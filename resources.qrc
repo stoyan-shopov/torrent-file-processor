@@ -1,0 +1,6 @@
+<RCC>
+    <qresource prefix="/translations"/>
+    <qresource prefix="/">
+        <file>torrent-file-processor_bg.qm</file>
+    </qresource>
+</RCC>
