@@ -12,9 +12,9 @@
 <context>
     <name>Main</name>
     <message>
-        <location filename="main.cxx" line="62"/>
+        <location filename="main.cxx" line="63"/>
         <source>SHA1 hash mismatch, affected file(s) in the corrupted torrent piece:</source>
-        <translation>Несъответствие в SHA1 контролната сума, засегнати файл(ове) във фрагмента от торент файла:</translation>
+        <translation type="unfinished">Несъответствие в SHA1 контролната сума, засегнати файл(ове) във фрагмента от торент файла:</translation>
     </message>
 </context>
 </TS>
