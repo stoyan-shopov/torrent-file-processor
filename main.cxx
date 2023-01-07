@@ -5,6 +5,7 @@
 #include <QCryptographicHash>
 #include <QElapsedTimer>
 #include <QCommandLineParser>
+#include <QDateTime>
 
 #include <functional>
 
@@ -139,7 +140,7 @@ int main(int argc, char *argv[])
 	/*! \todo	For some reason, setting the translator in windows 10 causes garbage to be printed in the console. */
 	if (0)
 	application.installTranslator(& translator);
-	int64_t total_length = 0, total_file_count = 0, total_torrents_processed = 0;
+	uint64_t total_length = 0, total_file_count = 0, total_torrents_processed = 0;
 
 	std::function<void(void)> printUsage = [] (void) -> void {
 		qInfo() << "Torrent data verifier.";
@@ -238,14 +239,77 @@ int main(int argc, char *argv[])
 		/* Verify a single torrent specified on the command line. */
 		torrent_files << torrent_source;
 
+	QStringList corrupted_torrents;
+
+	struct
+	{
+		unsigned file_count = 0;
+		uint64_t total_data_length = 0;
+	}
+	torrent_statistics;
+
+	/* Compute total number of files and total data length of the files in all torrents,
+	 * in order to be able to print percentage statistics during processing. */
 	for (const auto & torrent_file : torrent_files)
 	{
-		qInfo() << "Processing torrent file:" << torrent_file;
 		BitTorrent t(torrent_file);
 		if (!t.parse())
 		{
 			qCritical().noquote() << "Failed to process file" << torrent_file << "as a torrent file.";
-			continue;
+			return -1;
+		}
+		if (!t.torrent_details.files.length())
+		{
+			torrent_statistics.total_data_length += t.torrent_details.length;
+			torrent_statistics.file_count ++;
+		}
+		else
+		{
+			for (const auto & file : t.torrent_details.files)
+				torrent_statistics.total_data_length += file.length;
+			torrent_statistics.file_count += t.torrent_details.files.count();
+		}
+	}
+
+	QElapsedTimer timer;
+	timer.start();
+	const QByteArray logFileLineDelimiter = "-----------------------------------------------\n";
+
+	QFile logFile(QString("torrent-check-log-%1.txt").arg(QDateTime::currentDateTime().toString("ddMMyyyy-hhmmss")));
+	if (!logFile.open(QFile::WriteOnly))
+	{
+		qCritical().noquote() << "Can not open log file for writing:" << logFile.fileName();
+		return 1;
+	}
+
+	logFile.write(QString("Torrent data verification started, current time: %1\n\n").arg(QDateTime::currentDateTime().toString("dd/MM/yyyy, hh:mm:ss")).toLocal8Bit());
+	{
+		QString cmdline;
+		int i;
+		for (i = 0; i < argc; i ++)
+			cmdline += QString(argv[i]);
+		logFile.write(QString("Command line:\n%1\n").arg(cmdline).toLocal8Bit());
+	}
+	logFile.write(logFileLineDelimiter);
+	logFile.write("Verifying torrents:\n");
+	logFile.write(logFileLineDelimiter);
+	logFile.flush();
+
+	for (const auto & torrent_file : torrent_files)
+	{
+		qInfo() << "----------------------------------------------------";
+		qInfo().noquote() << "Processing torrent file:" << torrent_file
+			<< QString(": %1 files out of %2 (%3 %),")
+			   .arg(total_file_count).arg(torrent_statistics.file_count).arg(((double) total_file_count * 100.) / torrent_statistics.file_count, 0, 'f', 2)
+			<< QString("%1 bytes out of %2 (%3 %) processed,")
+			   .arg(total_length).arg(torrent_statistics.total_data_length).arg(((double) total_length * 100.) / torrent_statistics.total_data_length, 0, 'f', 2)
+			<< QString("%1 seconds (%2 hours) elapsed")
+			   .arg(timer.elapsed() / 1000).arg((double) timer.elapsed() / (3600 * 1000), 0, 'f', 2);
+		BitTorrent t(torrent_file);
+		if (!t.parse())
+		{
+			qCritical().noquote() << "Failed to process file" << torrent_file << "as a torrent file.";
+			return -1;
 		}
 		if (!t.torrent_details.files.length())
 		{
@@ -256,7 +320,7 @@ int main(int argc, char *argv[])
 		}
 		else
 		{
-			int64_t l = 0;
+			uint64_t l = 0;
 			if (verboseFlag)
 			{
 				qInfo() << "Torrent directory:" << t.torrent_details.name;
@@ -273,16 +337,61 @@ int main(int argc, char *argv[])
 		total_torrents_processed ++;
 		if (!verify_torrent_hashes(torrent_data_directory, t, verboseFlag, checkSizeOnlyFlag))
 		{
+			corrupted_torrents << torrent_file;
 			qCritical() << "Error processing torrent:" << torrent_file;
 			if (!continueOnErrorsFlag)
 			{
 				qCritical() << "Aborting torrent processing.";
 				break;
 			}
+			logFile.write(QString("%1\t: ERROR!!!\n").arg(torrent_file).toLocal8Bit());
 		}
+		else
+			logFile.write(QString("%1\t: OK\n").arg(torrent_file).toLocal8Bit());
+		logFile.flush();
 	}
-	qInfo() << "Total torrents processed:" << total_torrents_processed;
+	logFile.write(logFileLineDelimiter);
+	logFile.write("\n\n");
+	qInfo() << "";
+	if (corrupted_torrents.length())
+	{
+		logFile.write(logFileLineDelimiter);
+		logFile.write("!!! ERROR !!! ERROR !!! ERROR !!!\n");
+		logFile.write(logFileLineDelimiter);
+		logFile.write("Corrupted torrent data found! The data for the following torrents is corrupted:\n");
+		logFile.write(logFileLineDelimiter);
+		qCritical() << "Corrupted torrent data found! The data for the following torrents is corrupted:";
+		qCritical() << "----------------------------------------------------";
+		for (const auto & t : corrupted_torrents)
+		{
+			qCritical() << t;
+			logFile.write(t.toLocal8Bit() + '\n');
+		}
+		logFile.write(logFileLineDelimiter);
+		logFile.write("\n\n");
+		logFile.flush();
+		qCritical() << "----------------------------------------------------";
+		qCritical() << "";
+	}
+	qInfo().noquote() << "Total torrents processed:" << total_torrents_processed << QString("(%1 corrupted)").arg(corrupted_torrents.length());
 	qInfo() << "Total file count:" << total_file_count;
 	qInfo() << "Total data size:" << total_length << "bytes," << (double) total_length / (1024 * 1024 * 1024) << "gigabytes," << ((double) total_length / (1024 * 1024 * 1024)) / 1024 << "terabytes";
+
+	qint64 elapsed_time_ms = timer.elapsed();
+
+	qInfo().noquote() << QString("%1 seconds (%2 hours) elapsed")
+			     .arg(elapsed_time_ms / 1000).arg((double) elapsed_time_ms / (3600 * 1000), 0, 'f', 2);
+	logFile.write(QString("Total torrents processed: %1 (%2 corrupted)\n").arg(total_torrents_processed).arg(corrupted_torrents.length()).toLocal8Bit());
+	logFile.write(QString("Total file count: %1\n").arg(total_file_count).toLocal8Bit());
+	logFile.write(QString("Total data size: %1 bytes, %2 gigabytes, %3 terabytes\n")
+		      .arg(total_length)
+		      .arg((double) total_length / (1024 * 1024 * 1024), 0, 'f', 2)
+		      .arg(((double) total_length / (1024 * 1024 * 1024)) / 1024, 0, 'f', 2).toLocal8Bit());
+	logFile.write(QString("Processing took %1 seconds (%2 hours)\n")
+		      .arg(elapsed_time_ms / 1000)
+		      .arg((double) elapsed_time_ms / (3600 * 1000), 0, 'f', 2).toLocal8Bit());
+	logFile.write(QString("Average data read rate: %1 megabytes/second\n")
+		      .arg(((double) total_length / elapsed_time_ms) * 1000. / (1024 * 1024), 0, 'f', 2).toLocal8Bit());
+	logFile.close();
 	return 0;
 }
