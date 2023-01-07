@@ -294,8 +294,15 @@ private:
 			}
 			else
 			{
-				qCritical() << "Unrecognized key in the torrent 'info' dictionary:" << item.first;
-				return false;
+				/*! \todo	Resolve this - what is the 'name.utf-8' key supposed to mean?!?!
+				 * 		Ignore for the time being, time is getting short... */
+				if (item.first == "name.utf-8")
+					qCritical() << "!!! HANDLE THE 'name.utf-8' KEY (WHAT IS THIS???) !!!\nIgnore this now, time is getting short...";
+				else
+				{
+					qCritical() << "Unrecognized key in the torrent 'info' dictionary:" << item.first;
+					return false;
+				}
 			}
 		}
 
