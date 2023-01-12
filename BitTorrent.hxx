@@ -61,7 +61,7 @@ public:
 		QString s("[");
 		for (const auto & item : l)
 			s += item->print() + ", ";
-		if (s.last(2) == ", ")
+		if (s.length() > 1 && s.last(2) == ", ")
 			s.chop(2);
 		return s + ']';
 	}
@@ -79,7 +79,7 @@ public:
 		QString s("{");
 		for (const auto & item : d)
 			s += QString("\"%1\" : %2, ").arg(item.first).arg(item.second->print());
-		if (s.last(2) == ", ")
+		if (s.length() > 1 && s.last(2) == ", ")
 			s.chop(2);
 		return s + '}';
 	}

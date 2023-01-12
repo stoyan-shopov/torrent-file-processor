@@ -151,6 +151,7 @@ int main(int argc, char *argv[])
 		qInfo() << "";
 		qInfo() << "Options:";
 		qInfo() << "-h | --help	Print this usage information.";
+		qInfo() << "-d | --dump	Only dump torrent file details, do not perform torrent data verification.";
 		qInfo() << "-v | --verbose	Turn on verbose reporting.";
 		qInfo() << "-c | --continue	Do not stop on errors, process all torrents specified.";
 		qInfo() << "-l | --torrent-list		The specified 'torrent-source' argument is a text file containing a list of torrent file names (separated by newlines) to be verified.";
@@ -181,6 +182,9 @@ int main(int argc, char *argv[])
 	QCommandLineOption helpOption(QStringList() << "h" << "help", "Print usage information.");
 	cp.addOption(helpOption);
 
+	QCommandLineOption dumpOption(QStringList() << "d" << "dump", "Only dump torrent information, do not verify data");
+	cp.addOption(dumpOption);
+
 	QCommandLineOption verboseOption(QStringList() << "v" << "verbose", "Turn on verbose reporting.");
 	cp.addOption(verboseOption);
 
@@ -204,17 +208,26 @@ int main(int argc, char *argv[])
 	const bool continueOnErrorsFlag = cp.isSet(continueOption);
 	const bool torrentListFlag = cp.isSet(torrentListOption);
 	const bool checkSizeOnlyFlag = cp.isSet(sizeOnlyOption);
+	const bool dumpOnlyFlag = cp.isSet(dumpOption);
 
-	if (cp.positionalArguments().length() != 2)
+	/* Validate arguments. */
+	if (!dumpOnlyFlag && cp.positionalArguments().length() != 2)
 	{
 		qCritical() << "Invalid arguments, need to specify both a torrent directory, and a torrent source (either a torrent file name, or a file containing a list of torrents).";
 		qCritical() << "";
 		printUsage();
 		return 1;
 	}
+	else if (dumpOnlyFlag && cp.positionalArguments().length() != 1)
+	{
+		qCritical() << "Invalid arguments, need to specify a torrent source (either a torrent file name, or a file containing a list of torrents).";
+		qCritical() << "";
+		printUsage();
+		return 1;
+	}
 
-	const QString torrent_data_directory = cp.positionalArguments().at(0);
-	const QString torrent_source = cp.positionalArguments().at(1);
+	const QString torrent_data_directory = (dumpOnlyFlag ? "" : cp.positionalArguments().at(0));
+	const QString torrent_source = cp.positionalArguments().at(dumpOnlyFlag ? 0 : 1);
 
 	/* Build the list of torrents to be verified. */
 	QStringList torrent_files;
@@ -287,7 +300,7 @@ int main(int argc, char *argv[])
 		QString cmdline;
 		int i;
 		for (i = 0; i < argc; i ++)
-			cmdline += QString(argv[i]);
+			cmdline += QString(argv[i]) + ' ';
 		logFile.write(QString("Command line:\n%1\n").arg(cmdline).toLocal8Bit());
 	}
 	logFile.write(logFileLineDelimiter);
@@ -311,21 +324,47 @@ int main(int argc, char *argv[])
 			qCritical().noquote() << "Failed to process file" << torrent_file << "as a torrent file.";
 			return -1;
 		}
+		qInfo() << "Processing torrent:" << torrent_file;
+		if (dumpOnlyFlag)
+			logFile.write(QString("Processing torrent: %1\n").arg(torrent_file).toLocal8Bit());
 		if (!t.torrent_details.files.length())
 		{
-			if (verboseFlag)
-				qInfo() << "Torrent filename:" << t.torrent_details.name << ". Size:" << t.torrent_details.length;
+			if (dumpOnlyFlag)
+			{
+				QString s = QString("Single-file torrent, name: %1, size: %2").arg(t.torrent_details.name).arg(t.torrent_details.length);
+				qInfo().noquote() << s;
+				logFile.write((s + '\n').toLocal8Bit());
+			}
+			else if (verboseFlag)
+				qInfo() << "Single-file torrent, name:" << t.torrent_details.name << ". Size:" << t.torrent_details.length;
 			total_length += t.torrent_details.length;
 			total_file_count ++;
 		}
 		else
 		{
 			uint64_t l = 0;
+			if (dumpOnlyFlag)
+			{
+				qInfo() << "Torrent directory:" << t.torrent_details.name;
+				logFile.write(QString("Torrent directory: %1\n").arg(t.torrent_details.name).toLocal8Bit());
+				qInfo() << "Files in torrent:";
+				logFile.write("Files in torrent:\n\n");
+				for (const auto & f : t.torrent_details.files)
+				{
+					QString s;
+					for (const auto & p : f.path)
+						s += p + '/';
+					/* Remove last slash character. */
+					s.chop(1);
+					qInfo().noquote() << s;
+					logFile.write((s + '\n').toLocal8Bit());
+				}
+			}
 			if (verboseFlag)
 			{
 				qInfo() << "Torrent directory:" << t.torrent_details.name;
 				qInfo() << "Piece length:" << t.torrent_details.piece_length;
-				qInfo() << "Files in torrent:" << t.torrent_details.files.length();
+				qInfo() << "Number of files in torrent:" << t.torrent_details.files.length();
 			}
 			for (const auto & file : t.torrent_details.files)
 				l += file.length;
@@ -335,19 +374,23 @@ int main(int argc, char *argv[])
 			total_file_count += t.torrent_details.files.count();
 		}
 		total_torrents_processed ++;
-		if (!verify_torrent_hashes(torrent_data_directory, t, verboseFlag, checkSizeOnlyFlag))
+		if (!dumpOnlyFlag)
 		{
-			corrupted_torrents << torrent_file;
-			qCritical() << "Error processing torrent:" << torrent_file;
-			if (!continueOnErrorsFlag)
+			if (!verify_torrent_hashes(torrent_data_directory, t, verboseFlag, checkSizeOnlyFlag))
 			{
-				qCritical() << "Aborting torrent processing.";
-				break;
+				corrupted_torrents << torrent_file;
+				qCritical() << "Error processing torrent:" << torrent_file;
+				if (!continueOnErrorsFlag)
+				{
+					qCritical() << "Aborting torrent processing.";
+					break;
+				}
+				logFile.write(QString("%1\t: ERROR!!!\n").arg(torrent_file).toLocal8Bit());
 			}
-			logFile.write(QString("%1\t: ERROR!!!\n").arg(torrent_file).toLocal8Bit());
+			else
+				logFile.write(QString("%1\t: OK\n").arg(torrent_file).toLocal8Bit());
 		}
-		else
-			logFile.write(QString("%1\t: OK\n").arg(torrent_file).toLocal8Bit());
+
 		logFile.flush();
 	}
 	logFile.write(logFileLineDelimiter);
@@ -379,19 +422,22 @@ int main(int argc, char *argv[])
 
 	qint64 elapsed_time_ms = timer.elapsed();
 
-	qInfo().noquote() << QString("%1 seconds (%2 hours) elapsed")
-			     .arg(elapsed_time_ms / 1000).arg((double) elapsed_time_ms / (3600 * 1000), 0, 'f', 2);
+	if (!dumpOnlyFlag)
+		qInfo().noquote() << QString("%1 seconds (%2 hours) elapsed")
+				     .arg(elapsed_time_ms / 1000).arg((double) elapsed_time_ms / (3600 * 1000), 0, 'f', 2);
 	logFile.write(QString("Total torrents processed: %1 (%2 corrupted)\n").arg(total_torrents_processed).arg(corrupted_torrents.length()).toLocal8Bit());
 	logFile.write(QString("Total file count: %1\n").arg(total_file_count).toLocal8Bit());
 	logFile.write(QString("Total data size: %1 bytes, %2 gigabytes, %3 terabytes\n")
 		      .arg(total_length)
 		      .arg((double) total_length / (1024 * 1024 * 1024), 0, 'f', 2)
 		      .arg(((double) total_length / (1024 * 1024 * 1024)) / 1024, 0, 'f', 2).toLocal8Bit());
-	logFile.write(QString("Processing took %1 seconds (%2 hours)\n")
-		      .arg(elapsed_time_ms / 1000)
-		      .arg((double) elapsed_time_ms / (3600 * 1000), 0, 'f', 2).toLocal8Bit());
-	logFile.write(QString("Average data read rate: %1 megabytes/second\n")
-		      .arg(((double) total_length / elapsed_time_ms) * 1000. / (1024 * 1024), 0, 'f', 2).toLocal8Bit());
+	if (!dumpOnlyFlag)
+		logFile.write(QString("Processing took %1 seconds (%2 hours)\n")
+			      .arg(elapsed_time_ms / 1000)
+			      .arg((double) elapsed_time_ms / (3600 * 1000), 0, 'f', 2).toLocal8Bit());
+	if (!dumpOnlyFlag)
+		logFile.write(QString("Average data read rate: %1 megabytes/second\n")
+			      .arg(((double) total_length / elapsed_time_ms) * 1000. / (1024 * 1024), 0, 'f', 2).toLocal8Bit());
 	logFile.close();
 	return 0;
 }
