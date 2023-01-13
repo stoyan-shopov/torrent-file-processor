@@ -52,10 +52,9 @@ static bool verify_torrent_hashes(const QString & torrentDataDirectoryName, cons
 			fileSizes << f.length;
 		}
 	}
-	QByteArray data;
 
-	std::function<bool(const QString & current_file)> verifyHash = [&] (const QString & current_file) -> bool {
-		if (QCryptographicHash::hash(data, QCryptographicHash::Sha1).toHex().toLower() != hashes.front().toLower())
+	std::function<bool(const QString & current_file, const QByteArrayView & dataPiece)> verifyHash = [&] (const QString & current_file, const QByteArrayView & dataPiece) -> bool {
+		if (1 && QCryptographicHash::hash(dataPiece, QCryptographicHash::Sha1).toHex().toLower() != hashes.front().toLower())
 		{
 			QString affectedFiles;
 			for (const auto & t : current_piece_files_stack)
@@ -67,14 +66,14 @@ static bool verify_torrent_hashes(const QString & torrentDataDirectoryName, cons
 		}
 		current_piece_files_stack.clear();
 		hashes.pop_front();
-		total_length += data.length();
-		data.clear();
+		total_length += dataPiece.length();
 		return true;
 	};
 
+	QByteArray currentDataPiece;
 	for (const auto & f : fileNames)
 	{
-		assert(data.length() < piece_length);
+		assert(currentDataPiece.length() < piece_length);
 		QFileInfo fi(f);
 		if (!fi.exists())
 		{
@@ -102,14 +101,63 @@ static bool verify_torrent_hashes(const QString & torrentDataDirectoryName, cons
 			}
 			while (!file.atEnd())
 			{
+#if 1
+				/* Try to prefetch data. */
+				if (currentDataPiece.length() != 0)
+				{
+					/* Current data piece is incomplete - try to fill it up to a whole piece from the current file. */
+					currentDataPiece += file.read(piece_length - currentDataPiece.length());
+				}
+				else
+				{
+					/* The current data piece is empty - try to prefetch several data pieces. */
+					currentDataPiece = file.read(1 * piece_length);
+				}
+				int piece_index;
+				for (piece_index = 0; piece_index < currentDataPiece.length() / piece_length; piece_index ++)
+				{
+					if (!verifyHash(f, QByteArrayView(currentDataPiece.constData() + piece_index * piece_length, piece_length)))
+						return false;
+				}
+				if (piece_index)
+					/* An integral number of data pieces have been processed - discard the data pieces just processed. */
+					currentDataPiece = currentDataPiece.right(currentDataPiece.length() % piece_length);
+#elif 0
+				QByteArray cache = file.read(16 * 1024 * 1024);
+				while (cache.length())
+				{
+					QByteArray t = cache.left(piece_length - data.length());
+					cache = cache.mid(t.length());
+					data += t;
+					if (data.length() == piece_length)
+					{
+						if (!verifyHash(f))
+							return false;
+					}
+				}
+#else
+				/* Do not prefetch data. */
 				data += file.read(piece_length - data.length());
 				if (data.length() == piece_length)
 				{
 					if (!verifyHash(f))
 						return false;
 				}
+#endif
 			}
-			if (data.length())
+			unsigned remainder = currentDataPiece.length() % piece_length;
+			if (!remainder)
+			{
+				/* An integral number of data pieces have been processed - clear the current data piece. */
+				qDebug() << currentDataPiece.length() << piece_length;
+				currentDataPiece.clear();
+			}
+			else
+			{
+				/* There is some incomplete piece data remaining - keep it for the next checksum run. */
+				currentDataPiece = currentDataPiece.right(remainder);
+			}
+			if (currentDataPiece.length())
 				current_piece_files_stack << f;
 			if (verboseFlag)
 				qInfo() << "Processed file" << f;
@@ -118,7 +166,7 @@ static bool verify_torrent_hashes(const QString & torrentDataDirectoryName, cons
 		fileSizes.pop_front();
 	}
 	/* Handle last data piece. */
-	if (!checkSizeOnlyFlag && data.length() && !verifyHash(fileNames.last()))
+	if (!checkSizeOnlyFlag && currentDataPiece.length() && !verifyHash(fileNames.last(), currentDataPiece))
 		return false;
 
 	uint64_t milliseconds = timer.elapsed();
