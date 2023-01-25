@@ -298,6 +298,8 @@ private:
 				 * 		Ignore for the time being, time is getting short... */
 				if (item.first == "name.utf-8")
 					qCritical() << "!!! HANDLE THE 'name.utf-8' KEY (WHAT IS THIS???) !!!\nIgnore this now, time is getting short...";
+				else if (item.first == "md5sum")
+					qCritical() << "Handle the" << item.first << "key, ignoring now.";
 				else
 				{
 					qCritical() << "Unrecognized key in the torrent 'info' dictionary:" << item.first;

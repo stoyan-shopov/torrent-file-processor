@@ -12,8 +12,26 @@
 #include "BitTorrent.hxx"
 
 
+enum
+{
+	MD5_HASH_STRING_LENGTH	= 32,
+};
+
+struct TorrentCheckResult
+{
+	QString		torrent_filename;
+	/* If any corrupted pieces are found in the torrent, when SHA1 checksums of data pieces in the torrent is performed,
+	 * this list will hold all affected files. */
+	QStringList	corrupted_files_by_sha1_checksum;
+	/* If MD5 checksumming of data for files which names *look* like an MD5 hash value is performed,
+	 * this list will hold any files that have been found to be corrupted when checking the MD5 hashes. */
+	QStringList	corrupted_files_by_md5_checksum;
+
+	TorrentCheckResult(const QString & torrent_filename) : torrent_filename(torrent_filename){}
+};
+
 static bool verify_torrent_hashes(const QString & torrentDataDirectoryName, const BitTorrent & bitTorrent,
-		bool verboseFlag, bool checkSizeOnlyFlag)
+		bool verboseFlag, bool checkSizeOnlyFlag, bool computeMd5Hashes, struct TorrentCheckResult & checkResult)
 {
 	/* The list of files in the torrent piece currently verified - not including the currently processed file. */
 	QElapsedTimer timer;
@@ -55,23 +73,25 @@ static bool verify_torrent_hashes(const QString & torrentDataDirectoryName, cons
 	QByteArray data;
 
 	std::function<bool(const QString & current_file)> verifyHash = [&] (const QString & current_file) -> bool {
+		bool result = true;
 		if (QCryptographicHash::hash(data, QCryptographicHash::Sha1).toHex().toLower() != hashes.front().toLower())
 		{
 			QString affectedFiles;
 			for (const auto & t : current_piece_files_stack)
 				affectedFiles += '"' + t + '"' + ", ";
 			affectedFiles += '"' + current_file + '"';
-			qCritical().noquote() << QCoreApplication::translate("Main", "SHA1 hash mismatch, affected file(s) in the corrupted torrent piece:") << affectedFiles;
-			qCritical() << "More files possibly affected, aborting torrent checksum verification.";
-			return false;
+			qCritical().noquote() << QCoreApplication::translate("Main", "ERROR: SHA1 hash mismatch, affected file(s) in the corrupted torrent piece:") << affectedFiles;
+			checkResult.corrupted_files_by_sha1_checksum << current_piece_files_stack;
+			result = false;
 		}
 		current_piece_files_stack.clear();
 		hashes.pop_front();
 		total_length += data.length();
 		data.clear();
-		return true;
+		return result;
 	};
 
+	bool result = true;
 	for (const auto & f : fileNames)
 	{
 		assert(data.length() < piece_length);
@@ -100,33 +120,71 @@ static bool verify_torrent_hashes(const QString & torrentDataDirectoryName, cons
 				qCritical() << "Could not open file for reading:" << f;
 				return false;
 			}
+
+			/* If a computation of md5 hash checksums is requested, and if the filename *looks* like an md5 hash value,
+			 * compute the md5 hash and compare it to the filename. */
+			/* Remove any file extensions. */
+			QString md5HashFromFilename = QFileInfo(f).fileName().split('.').at(0);
+			md5HashFromFilename = md5HashFromFilename.split('.').at(0);
+			bool md5Flag = (md5HashFromFilename.length() == MD5_HASH_STRING_LENGTH);
+			/* See if the filename looks like an md5 hash value. */
+			if (md5Flag)
+				for (const auto & c : md5HashFromFilename)
+					if (		   !('0' <= c && c <= '9')
+							&& !('a' <= c && c <= 'f')
+							&& !('A' <= c && c <= 'F')
+							)
+					{
+						md5Flag = false;
+						break;
+					}
+			md5Flag = computeMd5Hashes && md5Flag;
+			QCryptographicHash md5hash(QCryptographicHash::Md5);
+
 			while (!file.atEnd())
 			{
-				data += file.read(piece_length - data.length());
+				const QByteArray dataPiece = file.read(piece_length - data.length());
+				data += dataPiece;
 				if (data.length() == piece_length)
-				{
-					if (!verifyHash(f))
-						return false;
-				}
+					result &= verifyHash(f);
+				if (md5Flag)
+					md5hash.addData(dataPiece);
 			}
 			if (data.length())
 				current_piece_files_stack << f;
 			if (verboseFlag)
+			{
 				qInfo() << "Processed file" << f;
+				if (computeMd5Hashes)
+				{
+					if (md5Flag)
+						qInfo() << "Also computed the MD5 hash for file" << f;
+					else
+						qInfo() << "NOTE: requested computing the MD5 hash for file" << f << ", but filename not recognized as an MD5 hash value, did not compute MD5 hash value for this file.";
+				}
+			}
+			if (md5Flag && md5hash.result().toHex().toLower() != md5HashFromFilename)
+			{
+				result = false;
+				qCritical().noquote() << "ERROR: MD5 hash mismatch for file" << f;
+				qCritical().noquote() << "ERROR: expected MD5 hash:" << md5HashFromFilename.toLower() << "; computed MD5 hash:" << md5hash.result().toHex().toLower();
+				checkResult.corrupted_files_by_md5_checksum << f;
+			}
+
 		}
 
 		fileSizes.pop_front();
 	}
 	/* Handle last data piece. */
 	if (!checkSizeOnlyFlag && data.length() && !verifyHash(fileNames.last()))
-		return false;
+		result = false;
 
 	uint64_t milliseconds = timer.elapsed();
 	if (!checkSizeOnlyFlag)
 		qInfo().noquote() << QString("Average speed %2 megabytes/second.")
 				     .arg((((double) total_length / milliseconds) * 1000.) / (1 << 20));
 
-	return true;
+	return result;
 }
 
 int main(int argc, char *argv[])
@@ -147,7 +205,7 @@ int main(int argc, char *argv[])
 		qInfo() << "Verifies downloaded torrent files by computing the torrent SHA1 checksums.";
 		qInfo() << "";
 		qInfo() << "Usage:";
-		qInfo() << "libgen-torrent-data-verifier [-h] [-v] [-c] [-l] torrent-data-directory torrent-source";
+		qInfo() << "libgen-torrent-data-verifier [-h] [-v] [-c] [-l] [-z] torrent-data-directory torrent-source";
 		qInfo() << "";
 		qInfo() << "Options:";
 		qInfo() << "-h | --help	Print this usage information.";
@@ -156,6 +214,7 @@ int main(int argc, char *argv[])
 		qInfo() << "-c | --continue	Do not stop on errors, process all torrents specified.";
 		qInfo() << "-l | --torrent-list		The specified 'torrent-source' argument is a text file containing a list of torrent file names (separated by newlines) to be verified.";
 		qInfo() << "			If this flag is not specified, the 'torrent-source' argument is the name of a single torrent file to be verified.";
+		qInfo() << "-m | --md5		Also compute and check MD5 hash checksums for files with names which *look* like and MD5 hash value.";
 		qInfo() << "-z | --check-size-only	Only check file sizes, and do not compute torrent checksums.";
 		qInfo() << "";
 		qInfo() << "A torrent data directory MUST always be specified.";
@@ -194,6 +253,9 @@ int main(int argc, char *argv[])
 	QCommandLineOption torrentListOption(QStringList() << "l" << "torrent-list", "The 'torrent-source' argument is a text file containing the list of torrents to be verified.");
 	cp.addOption(torrentListOption);
 
+	QCommandLineOption md5Option(QStringList() << "m" << "md5", "Also compute and check MD5 hash checksums for files with names which *look* like and MD5 hash value.");
+	cp.addOption(md5Option);
+
 	QCommandLineOption sizeOnlyOption(QStringList() << "z" << "check-size-only", "Only check file sizes, and do not compute torrent checksums.");
 	cp.addOption(sizeOnlyOption);
 
@@ -209,6 +271,7 @@ int main(int argc, char *argv[])
 	const bool torrentListFlag = cp.isSet(torrentListOption);
 	const bool checkSizeOnlyFlag = cp.isSet(sizeOnlyOption);
 	const bool dumpOnlyFlag = cp.isSet(dumpOption);
+	const bool md5Flag = cp.isSet(md5Option);
 
 	/* Validate arguments. */
 	if (!dumpOnlyFlag && cp.positionalArguments().length() != 2)
@@ -252,7 +315,7 @@ int main(int argc, char *argv[])
 		/* Verify a single torrent specified on the command line. */
 		torrent_files << torrent_source;
 
-	QStringList corrupted_torrents;
+	QList<TorrentCheckResult> checkResults;
 
 	struct
 	{
@@ -376,16 +439,36 @@ int main(int argc, char *argv[])
 		total_torrents_processed ++;
 		if (!dumpOnlyFlag)
 		{
-			if (!verify_torrent_hashes(torrent_data_directory, t, verboseFlag, checkSizeOnlyFlag))
+			TorrentCheckResult checkResult(torrent_file);
+
+			if (!verify_torrent_hashes(torrent_data_directory, t, verboseFlag, checkSizeOnlyFlag, md5Flag, checkResult))
 			{
-				corrupted_torrents << torrent_file;
+				checkResults << checkResult;
 				qCritical() << "Error processing torrent:" << torrent_file;
+				logFile.write(QString("%1\t: ERROR!!!\n").arg(torrent_file).toLocal8Bit());
+				if (checkResult.corrupted_files_by_sha1_checksum.length())
+				{
+					qCritical() << "Corrupted files in torrent:" << checkResult.corrupted_files_by_sha1_checksum.join(", ");
+					logFile.write(QString("%1\t: ERROR, corrupted files in torrent, SHA1 hash mismatch: %2\n")
+						      .arg(torrent_file)
+						      .arg(checkResult.corrupted_files_by_sha1_checksum.join(", "))
+						      .toLocal8Bit());
+				}
+				if (checkResult.corrupted_files_by_md5_checksum.length())
+				{
+					qCritical() << "Corrupted files in torrent, MD5 hash mismatch:" << checkResult.corrupted_files_by_md5_checksum.join(", ");
+					logFile.write(QString("%1\t: ERROR, corrupted files in torrent, MD5 hash mismatch: %2\n")
+						      .arg(torrent_file)
+						      .arg(checkResult.corrupted_files_by_md5_checksum.join(", "))
+						      .toLocal8Bit());
+				}
 				if (!continueOnErrorsFlag)
 				{
 					qCritical() << "Aborting torrent processing.";
 					break;
 				}
-				logFile.write(QString("%1\t: ERROR!!!\n").arg(torrent_file).toLocal8Bit());
+				logFile.write(logFileLineDelimiter);
+				qCritical() << "----------------------------------------------------";
 			}
 			else
 				logFile.write(QString("%1\t: OK\n").arg(torrent_file).toLocal8Bit());
@@ -396,8 +479,9 @@ int main(int argc, char *argv[])
 	logFile.write(logFileLineDelimiter);
 	logFile.write("\n\n");
 	qInfo() << "";
-	if (corrupted_torrents.length())
+	if (checkResults.length())
 	{
+		/* Print long list of corrupted torrents. */
 		logFile.write(logFileLineDelimiter);
 		logFile.write("!!! ERROR !!! ERROR !!! ERROR !!!\n");
 		logFile.write(logFileLineDelimiter);
@@ -405,18 +489,59 @@ int main(int argc, char *argv[])
 		logFile.write(logFileLineDelimiter);
 		qCritical() << "Corrupted torrent data found! The data for the following torrents is corrupted:";
 		qCritical() << "----------------------------------------------------";
-		for (const auto & t : corrupted_torrents)
+		for (const auto & t : checkResults)
 		{
-			qCritical() << t;
-			logFile.write(t.toLocal8Bit() + '\n');
+			qCritical().noquote() << t.torrent_filename;
+			logFile.write(t.torrent_filename.toLocal8Bit() + '\n');
+			if (t.corrupted_files_by_sha1_checksum.length())
+			{
+				qCritical().noquote() << "\tSHA1 corrupted files:";
+				logFile.write("\tSHA1 corrupted files:\n");
+				for (const auto & f : t.corrupted_files_by_sha1_checksum)
+				{
+					qCritical().noquote() << "\t" << f;
+					logFile.write(QString("\t%1\n").arg(f).toLocal8Bit());
+				}
+			}
+			if (t.corrupted_files_by_md5_checksum.length())
+			{
+				qCritical().noquote() << "\tMD5 corrupted files:";
+				logFile.write("\tMD5 corrupted files:\n");
+				for (const auto & f : t.corrupted_files_by_md5_checksum)
+				{
+					qCritical().noquote() << "\t" << f;
+					logFile.write(QString("\t%1\n").arg(f).toLocal8Bit());
+				}
+			}
+			logFile.write(logFileLineDelimiter);
+			qCritical() << "----------------------------------------------------";
+		}
+		logFile.write("\n\n");
+		logFile.flush();
+		qCritical() << "";
+
+		/* Print short list of corrupted torrents. */
+		logFile.write(logFileLineDelimiter);
+		logFile.write("!!! ERROR !!! ERROR !!! ERROR !!!\n");
+		logFile.write(logFileLineDelimiter);
+		logFile.write("Summary: the data for the following torrents is corrupted:\n");
+		logFile.write(logFileLineDelimiter);
+		qCritical() << "Summary: the data for the following torrents is corrupted:";
+		qCritical() << "----------------------------------------------------";
+		for (const auto & t : checkResults)
+		{
+			qCritical().noquote() << t.torrent_filename;
+			logFile.write(t.torrent_filename.toLocal8Bit() + '\n');
 		}
 		logFile.write(logFileLineDelimiter);
 		logFile.write("\n\n");
 		logFile.flush();
 		qCritical() << "----------------------------------------------------";
 		qCritical() << "";
+
+
 	}
-	qInfo().noquote() << "Total torrents processed:" << total_torrents_processed << QString("(%1 corrupted)").arg(corrupted_torrents.length());
+	qInfo().noquote() << "Total torrents processed:" << total_torrents_processed << QString("(%1 corrupted)").arg(checkResults.length());
 	qInfo() << "Total file count:" << total_file_count;
 	qInfo() << "Total data size:" << total_length << "bytes," << (double) total_length / (1024 * 1024 * 1024) << "gigabytes," << ((double) total_length / (1024 * 1024 * 1024)) / 1024 << "terabytes";
 
@@ -425,7 +550,7 @@ int main(int argc, char *argv[])
 	if (!dumpOnlyFlag)
 		qInfo().noquote() << QString("%1 seconds (%2 hours) elapsed")
 				     .arg(elapsed_time_ms / 1000).arg((double) elapsed_time_ms / (3600 * 1000), 0, 'f', 2);
-	logFile.write(QString("Total torrents processed: %1 (%2 corrupted)\n").arg(total_torrents_processed).arg(corrupted_torrents.length()).toLocal8Bit());
+	logFile.write(QString("Total torrents processed: %1 (%2 corrupted)\n").arg(total_torrents_processed).arg(checkResults.length()).toLocal8Bit());
 	logFile.write(QString("Total file count: %1\n").arg(total_file_count).toLocal8Bit());
 	logFile.write(QString("Total data size: %1 bytes, %2 gigabytes, %3 terabytes\n")
 		      .arg(total_length)
